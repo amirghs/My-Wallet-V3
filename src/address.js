@@ -10,6 +10,11 @@ var constants = require('./constants')
 var assert = require('assert')
 var { Record } = require('immutable')
 
+/*
+  NOTE: Even though Address inherits the Immutable API, it is considered
+    best practice to not use it externally.
+*/
+
 const AddressRecord = Record({
   addr: null,
   priv: null,
@@ -59,32 +64,45 @@ class Address extends AddressRecord {
     return this.get('tag') === 0
   }
 
+  static setActive (address) {
+    return address.set('tag', 0)
+  }
+
   isArchived () {
     return !this.isActive()
   }
 
-  static setActive (address, active) {
-    return address.set('tag', active ? 0 : 2)
+  static setArchived (address) {
+    return address.set('tag', 2)
   }
 
-  signMessage (message, cipher) {
+  signMessage (message) {
     assert(Helpers.isString(message), 'Expected message to be a string')
     assert(!this.isWatchOnly(), 'Private key needed for message signing')
-    assert(this.isUnEncrypted() || cipher != null, 'Cipher needed to decrypt key')
+    assert(this.isUnEncrypted(), 'Cannot sign with an encrypted private key')
 
-    let address = this.isEncrypted() ? this.applyCipher(cipher) : this
-    let priv = address.getPrivateKey()
+    let priv = this.getPrivateKey()
     let keyPair = Helpers.privateKeyStringToKey(priv, 'base58')
 
-    if (keyPair.getAddress() !== address.getAddress()) keyPair.compressed = false
+    keyPair.compressed = keyPair.getAddress() === this.getAddress();
     return Bitcoin.message.sign(keyPair, message, constants.getNetwork()).toString('base64')
   }
 
+  encrypt (cipher) {
+    if (this.isEncrypted()) throw new Error('Private key is already encrypted')
+    return this.applyCipher(cipher)
+  }
+
+  decrypt (cipher) {
+    if (this.isUnEncrypted()) throw new Error('Private key is not encrypted')
+    return this.applyCipher(cipher)
+  }
+
   applyCipher (cipher) {
-    if (this.isWatchOnly()) return this
+    if (cipher == null || this.isWatchOnly()) return this
     let encryptedPriv = cipher(this.getPrivateKey())
     if (!encryptedPriv) throw new Error('Cipher failed')
-    return this.set('privateKey', encryptedPriv)
+    return this.set('priv', encryptedPriv)
   }
 
   toJSON () {
@@ -97,16 +115,12 @@ class Address extends AddressRecord {
       compressed: true,
       network: constants.getNetwork()
     })
-    return Address.createFromKey(key, label)
+    return Address.import(key, label)
   }
 
-  static createFromObject (object) {
-    return new Address().merge(object)
-  }
-
-  static createFromString (keyOrAddr, label, bipPass) {
+  static fromString (keyOrAddr, label, bipPass) {
     if (Helpers.isBitcoinAddress(keyOrAddr)) {
-      return Promise.resolve(Address.createFromKey(keyOrAddr, label))
+      return Promise.resolve(Address.import(keyOrAddr, label))
     } else {
       // Import private key
       var format = Helpers.detectPrivateKeyFormat(keyOrAddr)
@@ -118,7 +132,7 @@ class Address extends AddressRecord {
 
         var parseBIP38Wrapper = function (resolve, reject) {
           ImportExport.parseBIP38toECPair(keyOrAddr, bipPass,
-            function (key) { resolve(Address.createFromKey(key, label)) },
+            function (key) { resolve(Address.import(key, label)) },
             function () { reject('wrongBipPass') },
             function () { reject('importError') }
           )
@@ -143,24 +157,24 @@ class Address extends AddressRecord {
             } else {
               myk.compressed = true
             }
-            return Address.createFromKey(myk, label)
+            return Address.import(myk, label)
           }
         ).catch(
           function (e) {
             myk.compressed = true
-            return Promise.resolve(Address.createFromKey(myk, label))
+            return Promise.resolve(Address.import(myk, label))
           }
         )
       } else if (okFormats.indexOf(format) > -1) {
         var k = Helpers.privateKeyStringToKey(keyOrAddr, format)
-        return Promise.resolve(Address.createFromKey(k, label))
+        return Promise.resolve(Address.import(k, label))
       } else {
         return Promise.reject('unknown key format')
       }
     }
   }
 
-  static createFromKey (key, label) {
+  static import (key, label) {
     let object = {
       label,
       created_time: Date.now(),
@@ -186,7 +200,7 @@ class Address extends AddressRecord {
         throw new Error('address import format not supported')
     }
 
-    return new Address().createFromObject(object)
+    return new Address(object)
   }
 }
 
